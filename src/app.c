@@ -9,8 +9,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
+#ifdef _WIN32
+  #include <direct.h>
+  #else
+  #include <sys/stat.h>
+#endif
 
 // summaries
 
@@ -252,6 +256,15 @@ static const char *base_name(const char *p) {
   return b;
 }
 
+// portable directory create: POSIX mkdir takes a mode, Windows _mkdir does not
+static int make_dir(const char *path) {
+#ifdef _WIN32
+  return _mkdir(path);
+#else
+  return mkdir(path, 0755);
+#endif
+}
+
 static void pick_image(App *app) {
   const char *filters[] = {"*.png", "*.jpg", "*.jpeg", "*.bmp", "*.gif"};
   const char *src = tinyfd_openFileDialog("Choose an image for the food", "", 5,
@@ -259,7 +272,7 @@ static void pick_image(App *app) {
   if (!src)
     return;
 
-  (void)mkdir(CONFIG_IMAGE_DIR, 0755); // ignore "already exists"
+  (void)make_dir(CONFIG_IMAGE_DIR); // ignore "already exists"
 
   char dst[CRAVE_PATH_CAP];
   snprintf(dst, sizeof dst, "%s/%ld_%s", CONFIG_IMAGE_DIR, (long)time(NULL),

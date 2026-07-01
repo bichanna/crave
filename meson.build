@@ -26,7 +26,18 @@ elif host_machine.system() == 'linux'
   system_libs = [dependency('gl'), dependency('x11'), dependency('threads'),
     cc.find_library('m'), cc.find_library('dl'), cc.find_library('rt')]
 
-# TODO: Windows support later
+elif host_machine.system() == 'windows'
+  raylib = cc.find_library('raylib',
+    dirs: root / 'thirdparty' / 'raylib' / 'windows_x64',
+    static: true
+  )
+  # libs pulled in by static raylib (GLFW backend) and tinyfiledialogs
+  system_libs = [
+    cc.find_library('opengl32'), cc.find_library('gdi32'),
+    cc.find_library('winmm'), cc.find_library('user32'),
+    cc.find_library('shell32'), cc.find_library('kernel32'),
+    cc.find_library('comdlg32'), cc.find_library('ole32'),
+  ]
 
 else
   error('unsupported OS')
@@ -43,13 +54,16 @@ includes = [
   include_directories('thirdparty/clay', is_system: true),
 ]
 
+# portable for GCC/Clang (-w) and MSVC (/w)
+nowarn = cc.get_argument_syntax() == 'msvc' ? ['/w'] : ['-w']
+
 thirdparty = static_library('thirdparty',
   'thirdparty/sqlite3/sqlite3.c',
   'thirdparty/tinyfiledialogs/tinyfiledialogs.c',
   'src/clay_raylib.c',
   'src/image.c',
   include_directories: includes,
-  c_args: ['-w']
+  c_args: nowarn
 )
 
 font_files = files([
@@ -77,5 +91,6 @@ executable('crave',
   include_directories: includes,
   link_with: thirdparty,
   dependencies: [raylib] + system_libs,
+  win_subsystem: 'windows',  # GUI app: no console window on Windows
   install: true
 )

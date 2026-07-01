@@ -1,4 +1,13 @@
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+#include <direct.h>
+#define CRAVE_MKDIR(p) _mkdir(p)
+#else
+#include <sys/stat.h>
+#define CRAVE_MKDIR(p) mkdir(p, 0755)
+#endif
 
 #include "clay.h"
 #include "raylib.h"
@@ -10,6 +19,47 @@
 
 static void on_clay_error(Clay_ErrorData e) {
   TraceLog(LOG_ERROR, "Clay: %.*s", (int)e.errorText.length, e.errorText.chars);
+}
+
+// Create a directory and any missing parents (best effort & ignores EEXIST).
+static void mkdirs(const char *path) {
+  char tmp[1024];
+  snprintf(tmp, sizeof tmp, "%s", path);
+  for (char *p = tmp + 1; *p; p++) {
+    if (*p == '/' || *p == '\\') {
+      char sep = *p;
+      *p = '\0';
+      (void)CRAVE_MKDIR(tmp);
+      *p = sep;
+    }
+  }
+  (void)CRAVE_MKDIR(tmp);
+}
+
+static bool resolve_data_dir(char *out, size_t cap) {
+#ifdef _WIN32
+  const char *base = getenv("APPDATA");
+  if (!base || !*base)
+    return false;
+  snprintf(out, cap, "%s\\Crave", base);
+#elif defined(__APPLE__)
+  const char *home = getenv("HOME");
+  if (!home || !*home)
+    return false;
+  snprintf(out, cap, "%s/Library/Application Support/Crave", home);
+#else
+  const char *xdg = getenv("XDG_DATA_HOME");
+  if (xdg && *xdg)
+    snprintf(out, cap, "%s/crave", xdg);
+  else {
+    const char *home = getenv("HOME");
+    if (!home || !*home)
+      return false;
+    snprintf(out, cap, "%s/.local/share/crave", home);
+  }
+#endif
+  mkdirs(out);
+  return true;
 }
 
 static Font load_mem(const unsigned char *data, int len) {
@@ -24,7 +74,12 @@ static Font load_mem(const unsigned char *data, int len) {
 }
 
 int main(void) {
-  ChangeDirectory(GetApplicationDirectory());
+  // store crave.db + images/ in the per-user data directory
+  char data_dir[1024];
+  if (resolve_data_dir(data_dir, sizeof data_dir))
+    ChangeDirectory(data_dir);
+  else
+    ChangeDirectory(GetApplicationDirectory());
 
   Clay_Raylib_Initialize(CONFIG_WINDOW_W, CONFIG_WINDOW_H, CONFIG_WINDOW_TITLE,
                          FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT |

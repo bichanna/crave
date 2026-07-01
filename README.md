@@ -78,16 +78,6 @@ meson setup build && meson compile -C build
 ./build/crave.exe
 ```
 
-### Release build
-
-```sh
-just release && meson compile -C build      # optimized, no debug info
-# or: meson setup build --buildtype=release && meson compile -C build
-```
-
-Run the binary from anywhere — recipes and images are stored in a per-user data
-directory (see [Data](#data)), not next to the executable.
-
 ## Package a macOS app
 
 ```sh

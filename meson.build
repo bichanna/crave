@@ -48,12 +48,25 @@ includes = [
   include_directories('thirdparty/clay', is_system: true),
 ]
 
+font_files = files([
+  'fonts/GeistMono-Bold.ttf',
+  'fonts/GeistMono-Italic.ttf',
+  'fonts/GeistMono-Regular.ttf',
+])
+
+fonts_h = custom_target('fonts.h',
+  output: 'fonts.h',
+  input: font_files,
+  command: [find_program('python3'), root / 'scripts' / 'embed_fonts.py', '@OUTPUT@', '@INPUT@']
+)
+
 src = [
   'src/main.c',
   'src/db.c',
   'src/app.c',
   'src/clay_raylib.c',
   'src/ui.c',
+  fonts_h
 ]
 
 executable('crave',

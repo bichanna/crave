@@ -1,0 +1,758 @@
+#include "app.h"
+
+#include "config.h"
+#include "raylib.h"
+#include "theme.h"
+
+#include <math.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "clay.h"
+
+#define ARENA_CAP 16384
+static char g_arena[ARENA_CAP];
+static int g_arena_off;
+
+static const char *fmtf(const char *fmt, ...) {
+  int avail = ARENA_CAP - g_arena_off;
+  if (avail < 32)
+    return "";
+
+  char *dst = g_arena + g_arena_off;
+  va_list ap;
+  va_start(ap, fmt);
+  int n = vsnprintf(dst, (size_t)avail, fmt, ap);
+  va_end(ap);
+
+  if (n < 0)
+    return "";
+  if (n >= avail)
+    n = avail - 1;
+
+  g_arena_off += n + 1;
+  return dst;
+}
+
+// Click pool
+
+typedef struct {
+  App *app;
+  Msg msg;
+} ClickCtx;
+
+#define CLICK_CHUNK 128
+typedef struct ClickChunk {
+  ClickCtx items[CLICK_CHUNK];
+  struct ClickChunk *next;
+} ClickChunk;
+
+static ClickChunk *g_head, *g_curr;
+static int g_idx;
+
+static ClickCtx *click_alloc(void) {
+  if (g_head == NULL) {
+    g_head = calloc(1, sizeof *g_head);
+    g_curr = g_head;
+    g_idx = 0;
+  }
+
+  if (g_curr == NULL)
+    return NULL;
+
+  if (g_idx == CLICK_CHUNK) {
+    if (g_curr->next == NULL)
+      g_curr->next = calloc(1, sizeof *g_curr->next);
+    g_curr = g_curr->next;
+    g_idx = 0;
+
+    if (g_curr == NULL)
+      return NULL;
+  }
+
+  return &g_curr->items[g_idx++];
+}
+
+static void click_reset(void) {
+  g_curr = g_head;
+  g_idx = 0;
+}
+
+void view_free(void) {
+  for (ClickChunk *c = g_head; c;) {
+    ClickChunk *next = c->next;
+    free(c);
+    c = next;
+  }
+
+  g_head = g_curr = NULL;
+  g_idx = 0;
+}
+
+static void on_press(Clay_ElementId id, Clay_PointerData p, void *user) {
+  (void)id;
+  ClickCtx *c = user;
+  if (p.state == CLAY_POINTER_DATA_PRESSED_THIS_FRAME)
+    c->app->pending = c->msg;
+}
+
+static void dispatch(App *app, Msg msg) {
+  ClickCtx *c = click_alloc();
+  if (!c)
+    return;
+
+  *c = (ClickCtx){app, msg};
+  Clay_OnHover(on_press, c);
+}
+
+// texture cache
+
+#define TEX_CACHE 256
+typedef struct {
+  char path[CRAVE_PATH_CAP];
+  Texture2D tex;
+  bool ok, used;
+} TexEntry;
+
+static TexEntry g_tex[TEX_CACHE];
+
+static Texture2D *cache_get(const char *rel) {
+  if (!rel || rel[0] == '\0')
+    return NULL;
+
+  for (int i = 0; i < TEX_CACHE; i++)
+    if (g_tex[i].used && strcmp(g_tex[i].path, rel) == 0)
+      return g_tex[i].ok ? &g_tex[i].tex : NULL;
+
+  for (int i = 0; i < TEX_CACHE; i++)
+    if (!g_tex[i].used) {
+      g_tex[i].used = true;
+      snprintf(g_tex[i].path, sizeof g_tex[i].path, "%s", rel);
+      Texture2D t = LoadTexture(rel);
+      if (t.id != 0) {
+        g_tex[i].tex = t;
+        g_tex[i].ok = true;
+        return &g_tex[i].tex;
+      }
+
+      g_tex[i].ok = false;
+      return NULL;
+    }
+
+  return NULL;
+}
+
+void ui_textures_unload(void) {
+  for (int i = 0; i < TEX_CACHE; i++)
+    if (g_tex[i].used && g_tex[i].ok)
+      UnloadTexture(g_tex[i].tex);
+}
+
+// helpers
+
+static Color rl(Clay_Color c) {
+  return (Color){(unsigned char)c.r, (unsigned char)c.g, (unsigned char)c.b,
+                 (unsigned char)c.a};
+}
+
+static Clay_String str(const char *s) {
+  return (Clay_String){
+      .isStaticallyAllocated = false, .length = (int32_t)strlen(s), .chars = s};
+}
+
+static void txt(const char *s, uint16_t size, uint16_t font, Clay_Color c) {
+  CLAY_TEXT(str(s), CLAY_TEXT_CONFIG({.fontId = font,
+                                      .fontSize = size,
+                                      .textColor = c,
+                                      .wrapMode = CLAY_TEXT_WRAP_NONE}));
+}
+
+static void txt_it(const char *s, uint16_t size, Clay_Color c) {
+  CLAY_TEXT(str(s), CLAY_TEXT_CONFIG({.fontId = CRAVE_FONT_ITALIC,
+                                      .fontSize = size,
+                                      .textColor = c,
+                                      .wrapMode = CLAY_TEXT_WRAP_NONE}));
+}
+
+static void para(const char *s, Clay_Color c) {
+  CLAY_TEXT(str(s), CLAY_TEXT_CONFIG({.fontId = CRAVE_FONT_REGULAR,
+                                      .fontSize = THEME_FONT_BODY,
+                                      .textColor = c,
+                                      .wrapMode = CLAY_TEXT_WRAP_WORDS}));
+}
+
+static void label(const char *s) {
+  txt(s, THEME_FONT_LABEL, CRAVE_FONT_BOLD, THEME_SOFT);
+}
+
+typedef enum { BTN_PRIMARY, BTN_SECONDARY, BTN_DANGER } ButtonKind;
+
+static void button(App *app, const char *id, const char *label, Msg msg,
+                   ButtonKind kind) {
+  Clay_Color base, hov, fg;
+  uint16_t b;
+  switch (kind) {
+  case BTN_PRIMARY:
+    base = THEME_INK;
+    hov = THEME_INK_HOVER;
+    fg = THEME_INVERT;
+    b = 0;
+    break;
+  case BTN_DANGER:
+    base = THEME_DANGER;
+    hov = THEME_DANGER_HOVER;
+    fg = THEME_INVERT;
+    b = 0;
+    break;
+  default:
+    base = THEME_CARD;
+    hov = THEME_CARD_HOVER;
+    fg = THEME_INK;
+    b = THEME_BORDER;
+    break;
+  }
+
+  CLAY(
+      CLAY_SID(str(id)),
+      {.layout = {.padding = {THEME_PAD_BTN_X, THEME_PAD_BTN_X, THEME_PAD_BTN_Y,
+                              THEME_PAD_BTN_Y},
+                  .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
+       .backgroundColor = Clay_Hovered() ? hov : base,
+       .border = {.color = THEME_LINE, .width = {b, b, b, b, 0}}}) {
+    dispatch(app, msg);
+    txt(label, THEME_FONT_BTN, CRAVE_FONT_REGULAR, fg);
+  }
+}
+
+// compact square remove button
+static void x_button(App *app, const char *id, Msg msg) {
+  CLAY(
+      CLAY_SID(str(id)),
+      {.layout = {.sizing = {CLAY_SIZING_FIXED(THEME_FIELD_H),
+                             CLAY_SIZING_FIXED(THEME_FIELD_H)},
+                  .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
+       .backgroundColor = Clay_Hovered() ? THEME_CARD_HOVER : THEME_CARD,
+       .border = {.color = THEME_LINE,
+                  .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
+                            THEME_BORDER, 0}}}) {
+    dispatch(app, msg);
+    txt("x", THEME_FONT_BODY, CRAVE_FONT_REGULAR, THEME_SOFT);
+  }
+}
+
+static void image_block(App *app, const char *rel, float w, float h,
+                        const char *id) {
+  (void)app;
+  Texture2D *t = cache_get(rel);
+  if (t) {
+    CLAY(CLAY_SID(str(id)),
+         {.layout = {.sizing = {CLAY_SIZING_FIXED(w), CLAY_SIZING_FIXED(h)}},
+          .image = {.imageData = t},
+          .border = {.color = THEME_LINE,
+                     .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
+                               THEME_BORDER, 0}}}) {}
+  } else {
+    CLAY(CLAY_SID(str(id)),
+         {.layout = {.sizing = {CLAY_SIZING_FIXED(w), CLAY_SIZING_FIXED(h)},
+                     .childAlignment = {CLAY_ALIGN_X_CENTER,
+                                        CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = THEME_CARD_HOVER,
+          .border = {.color = THEME_LINE,
+                     .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
+                               THEME_BORDER, 0}}}) {
+      txt_it("no image", THEME_FONT_LABEL, THEME_SOFT);
+    }
+  }
+}
+
+static float field_scroll(App *app, int idx, float cw, float innerW) {
+  if (app->focus != idx)
+    return 0;
+  float caretX = (float)app->cursor * cw;
+  if (caretX > innerW)
+    return caretX - innerW + cw;
+  return 0;
+}
+
+static void edit_field(App *app, FieldRef *fields, int idx,
+                       const char *placeholder) {
+  FieldRef *f = &fields[idx];
+  bool focused = (app->focus == idx);
+  bool empty = (f->buf[0] == '\0');
+
+  CLAY(CLAY_IDI("F", f->key),
+       {.layout = {.sizing = {CLAY_SIZING_GROW(0),
+                              CLAY_SIZING_FIXED(THEME_FIELD_H)},
+                   .padding = {THEME_PAD_FIELD, THEME_PAD_FIELD, 0, 0},
+                   .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}},
+        .backgroundColor = THEME_FIELD,
+        .border = {.color = focused ? THEME_LINE_FOCUS : THEME_LINE,
+                   .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
+                             THEME_BORDER, 0}},
+        .clip = {.horizontal = true}}) {
+    if (empty && !focused)
+      txt_it(placeholder, THEME_FONT_BODY, THEME_SOFT);
+  }
+}
+
+// fixed width wrapper
+static void edit_field_w(App *app, FieldRef *fields, int idx, float w,
+                         const char *placeholder, const char *wrapid) {
+  CLAY(CLAY_SID(str(wrapid)),
+       {.layout = {.sizing = {CLAY_SIZING_FIXED(w), CLAY_SIZING_FIT(0)}}}) {
+    edit_field(app, fields, idx, placeholder);
+  }
+}
+
+static void section_header(const char *s) {
+  CLAY(CLAY_SID(str(fmtf("sh_%s", s))),
+       {.layout = {.padding = {0, 0, THEME_GAP_SM, 0}}}) {
+    txt(s, THEME_FONT_H2, CRAVE_FONT_BOLD, THEME_INK);
+  }
+}
+
+static void screen_grid(App *app) {
+  CLAY(CLAY_ID("GHead"),
+       {.layout = {
+            .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+            .childGap = THEME_GAP,
+            .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+    txt("Crave", THEME_FONT_TITLE, CRAVE_FONT_BOLD, THEME_INK);
+    CLAY(CLAY_ID("GSpacer"),
+         {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}}}) {}
+    button(app, "bNew", "+ New", (Msg){.tag = MSG_NEW}, BTN_PRIMARY);
+  }
+
+  CLAY(CLAY_ID("Grid"),
+       {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                   .childGap = THEME_GAP_SM,
+                   .layoutDirection = CLAY_TOP_TO_BOTTOM},
+        .clip = {.vertical = true, .childOffset = Clay_GetScrollOffset()}}) {
+    for (int i = 0; i < app->summary_count; i++) {
+      RecipeSummary *s = &app->summaries[i];
+      CLAY(CLAY_IDI("Row", (uint32_t)i),
+           {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                       .padding = {THEME_GAP_SM, THEME_GAP_SM, THEME_GAP_SM,
+                                   THEME_GAP_SM},
+                       .childGap = THEME_GAP,
+                       .childAlignment = {CLAY_ALIGN_X_LEFT,
+                                          CLAY_ALIGN_Y_CENTER}},
+            .backgroundColor = Clay_Hovered() ? THEME_CARD_HOVER : THEME_CARD,
+            .border = {.color = THEME_LINE,
+                       .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
+                                 THEME_BORDER, 0}}}) {
+        dispatch(app, (Msg){.tag = MSG_SHOW, .id = s->id});
+        image_block(app, s->image_path, CONFIG_THUMB, CONFIG_THUMB,
+                    fmtf("th%ld", s->id));
+        CLAY(CLAY_SID(str(fmtf("rc%ld", s->id))),
+             {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                         .childGap = THEME_GAP_XS,
+                         .layoutDirection = CLAY_TOP_TO_BOTTOM}}) {
+          txt(s->title[0] ? s->title : "Untitled", THEME_FONT_H2,
+              CRAVE_FONT_BOLD, THEME_INK);
+          if (s->tag_count > 0)
+            CLAY(CLAY_SID(str(fmtf("rt%ld", s->id))),
+                 {.layout = {.childGap = THEME_GAP_XS}}) {
+              for (int t = 0; t < s->tag_count; t++)
+                CLAY(CLAY_SID(str(fmtf("rtg%ld_%d", s->id, t))),
+                     {.layout = {.padding = {6, 6, 2, 2}},
+                      .backgroundColor = THEME_PAPER,
+                      .border = {.color = THEME_LINE,
+                                 .width = {THEME_BORDER, THEME_BORDER,
+                                           THEME_BORDER, THEME_BORDER, 0}}}) {
+                  txt(s->tags[t], THEME_FONT_LABEL, CRAVE_FONT_REGULAR,
+                      THEME_SOFT);
+                }
+            }
+        }
+      }
+    }
+
+    if (app->summary_count == 0)
+      txt_it("No recipes yet - press + New.", THEME_FONT_BODY, THEME_SOFT);
+  }
+}
+
+static void detail_stat(const char *lbl, const char *value) {
+  CLAY(CLAY_SID(str(fmtf("st_%s", lbl))),
+       {.layout = {.padding = {THEME_PAD_FIELD, THEME_PAD_FIELD,
+                               THEME_PAD_FIELD, THEME_PAD_FIELD},
+                   .childGap = THEME_GAP_XS,
+                   .layoutDirection = CLAY_TOP_TO_BOTTOM},
+        .backgroundColor = THEME_CARD,
+        .border = {.color = THEME_LINE,
+                   .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
+                             THEME_BORDER, 0}}}) {
+    label(lbl);
+    txt(value[0] ? value : "-", THEME_FONT_BODY, CRAVE_FONT_REGULAR, THEME_INK);
+  }
+}
+
+static void screen_detail(App *app) {
+  Recipe *r = &app->editor.recipe;
+
+  CLAY(CLAY_ID("DHead"),
+       {.layout = {
+            .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+            .childGap = THEME_GAP_SM,
+            .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+    txt(r->title[0] ? r->title : "Untitled", THEME_FONT_TITLE, CRAVE_FONT_BOLD,
+        THEME_INK);
+    CLAY(CLAY_ID("DSpacer"),
+         {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}}}) {}
+    button(app, "bBack", "Back", (Msg){.tag = MSG_BACK}, BTN_SECONDARY);
+    button(app, "bDel", "Delete", (Msg){.tag = MSG_DELETE}, BTN_DANGER);
+    button(app, "bEdit", "Edit", (Msg){.tag = MSG_EDIT}, BTN_PRIMARY);
+  }
+
+  CLAY(CLAY_ID("DBody"),
+       {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                   .childGap = THEME_GAP,
+                   .layoutDirection = CLAY_TOP_TO_BOTTOM},
+        .clip = {.vertical = true, .childOffset = Clay_GetScrollOffset()}}) {
+    image_block(app, r->image_path, CONFIG_PREVIEW_W, CONFIG_PREVIEW_H, "dimg");
+
+    CLAY(CLAY_ID("DMeta"), {.layout = {.childGap = THEME_GAP}}) {
+      detail_stat("SERVINGS", app->editor.servings);
+      detail_stat("PREP (MIN)", app->editor.prep);
+      detail_stat("COOK (MIN)", app->editor.cook);
+    }
+
+    if (r->description[0]) {
+      section_header("DESCRIPTION");
+      para(r->description, THEME_INK);
+    }
+
+    if (r->ingredient_count > 0) {
+      section_header("INGREDIENTS");
+      for (int i = 0; i < r->ingredient_count; i++)
+        CLAY(CLAY_SID(str(fmtf("di%d", i))),
+             {.layout = {.childGap = THEME_GAP_SM,
+                         .childAlignment = {CLAY_ALIGN_X_LEFT,
+                                            CLAY_ALIGN_Y_CENTER}}}) {
+          if (r->ingredients[i].amount[0])
+            txt(r->ingredients[i].amount, THEME_FONT_BODY, CRAVE_FONT_BOLD,
+                THEME_INK);
+          txt(r->ingredients[i].name, THEME_FONT_BODY, CRAVE_FONT_REGULAR,
+              THEME_INK);
+        }
+    }
+
+    if (r->equipment_count > 0) {
+      section_header("EQUIPMENT");
+      for (int i = 0; i < r->equipment_count; i++)
+        txt(r->equipment[i].name, THEME_FONT_BODY, CRAVE_FONT_REGULAR,
+            THEME_INK);
+    }
+
+    if (r->step_count > 0) {
+      section_header("STEPS");
+      for (int i = 0; i < r->step_count; i++)
+        CLAY(CLAY_SID(str(fmtf("ds%d", i))),
+             {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                         .childGap = THEME_GAP_SM}}) {
+          txt(fmtf("%d.", i + 1), THEME_FONT_BODY, CRAVE_FONT_BOLD, THEME_SOFT);
+          para(r->steps[i].text, THEME_INK);
+        }
+    }
+
+    if (r->tag_count > 0) {
+      section_header("TAGS");
+      CLAY(CLAY_ID("DTags"), {.layout = {.childGap = THEME_GAP_XS}}) {
+        for (int i = 0; i < r->tag_count; i++)
+          CLAY(CLAY_SID(str(fmtf("dt%d", i))),
+               {.layout = {.padding = {8, 8, 3, 3}},
+                .backgroundColor = THEME_CARD,
+                .border = {.color = THEME_LINE,
+                           .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
+                                     THEME_BORDER, 0}}}) {
+            txt(r->tags[i], THEME_FONT_LABEL, CRAVE_FONT_REGULAR, THEME_SOFT);
+          }
+      }
+    }
+  }
+}
+
+// editor
+
+static void list_row(App *app, const char *rowid, ListId list, int item,
+                     bool ingredient, FieldRef *fields, int *fi) {
+  CLAY(CLAY_SID(str(rowid)),
+       {.layout = {
+            .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+            .childGap = THEME_GAP_SM,
+            .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+    if (ingredient) {
+      edit_field_w(app, fields, (*fi)++, 130, "Amount", fmtf("%s_a", rowid));
+      edit_field(app, fields, (*fi)++, "Ingredient");
+    } else {
+      edit_field(app, fields, (*fi)++, "...");
+    }
+    x_button(app, fmtf("%s_x", rowid),
+             (Msg){.tag = MSG_LIST_DEL, .list = list, .i = item});
+  }
+}
+
+static void screen_edit(App *app) {
+  Editor *e = &app->editor;
+  Recipe *r = &e->recipe;
+  FieldRef fields[MAX_FIELDS];
+  int nf = collect_fields(e, fields);
+  (void)nf;
+  int fi = 0;
+
+  CLAY(CLAY_ID("EHead"),
+       {.layout = {
+            .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+            .childGap = THEME_GAP_SM,
+            .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+    txt(r->id == 0 ? "New recipe" : "Edit recipe", THEME_FONT_TITLE,
+        CRAVE_FONT_BOLD, THEME_INK);
+    CLAY(CLAY_ID("ESpacer"),
+         {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}}}) {}
+    button(app, "bCancel", "Cancel", (Msg){.tag = MSG_CANCEL}, BTN_SECONDARY);
+    button(app, "bSave", "Save", (Msg){.tag = MSG_SAVE}, BTN_PRIMARY);
+  }
+
+  CLAY(CLAY_ID("EBody"),
+       {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                   .childGap = THEME_GAP,
+                   .layoutDirection = CLAY_TOP_TO_BOTTOM},
+        .clip = {.vertical = true, .childOffset = Clay_GetScrollOffset()}}) {
+    /* image + upload */
+    CLAY(CLAY_ID("EImg"),
+         {.layout = {
+              .childGap = THEME_GAP,
+              .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
+      image_block(app, r->image_path, CONFIG_PREVIEW_W, CONFIG_PREVIEW_H,
+                  "eimg");
+      button(app, "bUpload", "Upload image", (Msg){.tag = MSG_PICK_IMAGE},
+             BTN_SECONDARY);
+    }
+
+    label("TITLE");
+    edit_field(app, fields, fi++, "Recipe name");
+    label("DESCRIPTION");
+    edit_field(app, fields, fi++, "Short description");
+
+    CLAY(CLAY_ID("EMeta"), {.layout = {.childGap = THEME_GAP}}) {
+      CLAY(CLAY_ID("EmS"),
+           {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                       .childGap = THEME_GAP_XS,
+                       .layoutDirection = CLAY_TOP_TO_BOTTOM}}) {
+        label("SERVINGS");
+        edit_field(app, fields, fi++, "0");
+      }
+      CLAY(CLAY_ID("EmP"),
+           {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                       .childGap = THEME_GAP_XS,
+                       .layoutDirection = CLAY_TOP_TO_BOTTOM}}) {
+        label("PREP (MIN)");
+        edit_field(app, fields, fi++, "0");
+      }
+      CLAY(CLAY_ID("EmC"),
+           {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                       .childGap = THEME_GAP_XS,
+                       .layoutDirection = CLAY_TOP_TO_BOTTOM}}) {
+        label("COOK (MIN)");
+        edit_field(app, fields, fi++, "0");
+      }
+    }
+
+    section_header("INGREDIENTS");
+    for (int i = 0; i < r->ingredient_count; i++)
+      list_row(app, fmtf("ei%d", i), LIST_ING, i, true, fields, &fi);
+    button(app, "addIng", "+ Add ingredient",
+           (Msg){.tag = MSG_LIST_ADD, .list = LIST_ING}, BTN_SECONDARY);
+
+    section_header("EQUIPMENT");
+    for (int i = 0; i < r->equipment_count; i++)
+      list_row(app, fmtf("ee%d", i), LIST_EQUIP, i, false, fields, &fi);
+    button(app, "addEq", "+ Add equipment",
+           (Msg){.tag = MSG_LIST_ADD, .list = LIST_EQUIP}, BTN_SECONDARY);
+
+    section_header("STEPS");
+    for (int i = 0; i < r->step_count; i++)
+      list_row(app, fmtf("es%d", i), LIST_STEP, i, false, fields, &fi);
+    button(app, "addStep", "+ Add step",
+           (Msg){.tag = MSG_LIST_ADD, .list = LIST_STEP}, BTN_SECONDARY);
+
+    section_header("TAGS");
+    for (int i = 0; i < r->tag_count; i++)
+      list_row(app, fmtf("et%d", i), LIST_TAG, i, false, fields, &fi);
+    button(app, "addTag", "+ Add tag",
+           (Msg){.tag = MSG_LIST_ADD, .list = LIST_TAG}, BTN_SECONDARY);
+  }
+}
+
+// delete modal
+
+static void modal_delete(App *app) {
+  CLAY(
+      CLAY_ID("Scrim"),
+      {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                  .childAlignment = {CLAY_ALIGN_X_CENTER, CLAY_ALIGN_Y_CENTER}},
+       .backgroundColor = THEME_SCRIM,
+       .floating = {.attachTo = CLAY_ATTACH_TO_ROOT,
+                    .pointerCaptureMode = CLAY_POINTER_CAPTURE_MODE_CAPTURE}}) {
+    CLAY(CLAY_ID("Modal"),
+         {.layout = {.sizing = {CLAY_SIZING_FIXED(380), CLAY_SIZING_FIT(0)},
+                     .padding = {THEME_PAD, THEME_PAD, THEME_PAD, THEME_PAD},
+                     .childGap = THEME_GAP,
+                     .layoutDirection = CLAY_TOP_TO_BOTTOM},
+          .backgroundColor = THEME_CARD,
+          .border = {.color = THEME_LINE,
+                     .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
+                               THEME_BORDER, 0}}}) {
+      txt("Delete this recipe?", THEME_FONT_H2, CRAVE_FONT_BOLD, THEME_INK);
+      para("This can't be undone.", THEME_SOFT);
+      CLAY(CLAY_ID("MBtns"),
+           {.layout = {
+                .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
+                .childGap = THEME_GAP_SM,
+                .childAlignment = {CLAY_ALIGN_X_RIGHT, CLAY_ALIGN_Y_CENTER}}}) {
+        CLAY(CLAY_ID("MSp"), {.layout = {.sizing = {CLAY_SIZING_GROW(0),
+                                                    CLAY_SIZING_FIT(0)}}}) {}
+        button(app, "mNo", "Cancel", (Msg){.tag = MSG_DELETE_NO},
+               BTN_SECONDARY);
+        button(app, "mYes", "Delete", (Msg){.tag = MSG_DELETE_YES}, BTN_DANGER);
+      }
+    }
+  }
+}
+
+// view
+
+void view(App *app) {
+  g_arena_off = 0;
+
+  click_reset();
+
+  CLAY(CLAY_ID("Root"),
+       {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
+                   .padding = {THEME_PAD, THEME_PAD, THEME_PAD, THEME_PAD},
+                   .childGap = THEME_GAP,
+                   .layoutDirection = CLAY_TOP_TO_BOTTOM},
+        .backgroundColor = THEME_PAPER}) {
+    switch (app->screen) {
+    case SCREEN_DETAIL:
+      screen_detail(app);
+      break;
+    case SCREEN_EDIT:
+      screen_edit(app);
+      break;
+    default:
+      screen_grid(app);
+      break;
+    }
+    if (app->confirm_delete)
+      modal_delete(app);
+  }
+}
+
+// mouse + overlay
+
+static int g_drag = -1;
+
+void ui_handle_mouse(App *app) {
+  if (app->screen != SCREEN_EDIT) {
+    g_drag = -1;
+    return;
+  }
+  Vector2 mp = GetMousePosition();
+  Font font = app->fonts[CRAVE_FONT_REGULAR];
+  float fs = THEME_FONT_BODY;
+  float cw = MeasureTextEx(font, "W", fs, 0).x;
+  if (cw <= 0)
+    cw = fs * 0.6f;
+  float pad = THEME_PAD_FIELD;
+  FieldRef fields[MAX_FIELDS];
+  int n = collect_fields(&app->editor, fields);
+
+  if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+    g_drag = -1;
+    for (int i = 0; i < n; i++) {
+      Clay_ElementData ed = Clay_GetElementData(CLAY_IDI("F", fields[i].key));
+      if (!ed.found)
+        continue;
+      Clay_BoundingBox b = ed.boundingBox;
+      if (mp.x >= b.x && mp.x <= b.x + b.width && mp.y >= b.y &&
+          mp.y <= b.y + b.height) {
+        app->focus = i;
+        float scroll = field_scroll(app, i, cw, b.width - 2 * pad);
+        int idx = (int)((mp.x - (b.x + pad - scroll)) / cw + 0.5f);
+        int len = (int)strlen(fields[i].buf);
+        if (idx < 0)
+          idx = 0;
+        if (idx > len)
+          idx = len;
+        app->cursor = idx;
+        app->sel_anchor = idx;
+        g_drag = i;
+        break;
+      }
+    }
+  } else if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && g_drag >= 0 &&
+             g_drag < n) {
+    Clay_ElementData ed =
+        Clay_GetElementData(CLAY_IDI("F", fields[g_drag].key));
+    if (ed.found) {
+      Clay_BoundingBox b = ed.boundingBox;
+      float scroll = field_scroll(app, g_drag, cw, b.width - 2 * pad);
+      int idx = (int)((mp.x - (b.x + pad - scroll)) / cw + 0.5f);
+      int len = (int)strlen(fields[g_drag].buf);
+      if (idx < 0)
+        idx = 0;
+      if (idx > len)
+        idx = len;
+      app->cursor = idx;
+    }
+  } else if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) {
+    g_drag = -1;
+  }
+}
+
+void ui_overlay(App *app) {
+  if (app->screen != SCREEN_EDIT)
+    return;
+  FieldRef fields[MAX_FIELDS];
+  int n = collect_fields(&app->editor, fields);
+  Font font = app->fonts[CRAVE_FONT_REGULAR];
+  float fs = THEME_FONT_BODY;
+  float cw = MeasureTextEx(font, "W", fs, 0).x;
+  if (cw <= 0)
+    cw = fs * 0.6f;
+  float pad = THEME_PAD_FIELD;
+
+  for (int i = 0; i < n; i++) {
+    Clay_ElementData ed = Clay_GetElementData(CLAY_IDI("F", fields[i].key));
+    if (!ed.found)
+      continue;
+    Clay_BoundingBox b = ed.boundingBox;
+    float innerW = b.width - 2 * pad;
+    if (innerW < 1)
+      continue;
+    const char *text = fields[i].buf;
+    bool focused = (app->focus == i);
+    float scroll = field_scroll(app, i, cw, innerW);
+    float tx = b.x + pad - scroll;
+    float ty = b.y + (b.height - fs) / 2.0f;
+
+    BeginScissorMode((int)(b.x + pad), (int)b.y, (int)innerW, (int)b.height);
+    if (focused && app->sel_anchor != app->cursor) {
+      int lo = app->sel_anchor < app->cursor ? app->sel_anchor : app->cursor;
+      int hi = app->sel_anchor < app->cursor ? app->cursor : app->sel_anchor;
+      DrawRectangle((int)(tx + lo * cw), (int)ty, (int)((hi - lo) * cw),
+                    (int)fs, rl(THEME_SELECT));
+    }
+    if (text[0])
+      DrawTextEx(font, text, (Vector2){tx, ty}, fs, 0, rl(THEME_INK));
+    if (focused && fmodf((float)GetTime(), 1.0f) < 0.5f)
+      DrawRectangle((int)(tx + (float)app->cursor * cw), (int)ty, 2, (int)fs,
+                    rl(THEME_INK));
+    EndScissorMode();
+  }
+}

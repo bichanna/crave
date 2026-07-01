@@ -49,7 +49,11 @@ includes = [
 ]
 
 src = [
-  'src/main.c'
+  'src/main.c',
+  'src/db.c',
+  'src/app.c',
+  'src/clay_raylib.c',
+  'src/ui.c',
 ]
 
 executable('crave',

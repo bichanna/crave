@@ -32,21 +32,25 @@ else
   error('unsupported OS')
 endif
 
-thirdparty = static_library('thirdparty',
-  'thirdparty/sqlite3/sqlite3.c',
-  'thirdparty/tinyfiledialogs/tinyfiledialogs.c',
-  c_args: ['-w']
-)
-
 includes = [
   include_directories(
     'src',
     'thirdparty/sqlite3',
     'thirdparty/tinyfiledialogs',
-    'thirdparty/raylib'
+    'thirdparty/raylib',
+    'thirdparty/stb',
   ),
   include_directories('thirdparty/clay', is_system: true),
 ]
+
+thirdparty = static_library('thirdparty',
+  'thirdparty/sqlite3/sqlite3.c',
+  'thirdparty/tinyfiledialogs/tinyfiledialogs.c',
+  'src/clay_raylib.c',
+  'src/image.c',
+  include_directories: includes,
+  c_args: ['-w']
+)
 
 font_files = files([
   'fonts/GeistMono-Bold.ttf',
@@ -64,7 +68,6 @@ src = [
   'src/main.c',
   'src/db.c',
   'src/app.c',
-  'src/clay_raylib.c',
   'src/ui.c',
   fonts_h
 ]

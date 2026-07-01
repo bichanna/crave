@@ -1,6 +1,7 @@
 #include "app.h"
 
 #include "config.h"
+#include "image.h"
 #include "raylib.h"
 #include "theme.h"
 
@@ -131,8 +132,10 @@ static Texture2D *cache_get(const char *rel) {
     if (!g_tex[i].used) {
       g_tex[i].used = true;
       snprintf(g_tex[i].path, sizeof g_tex[i].path, "%s", rel);
-      Texture2D t = LoadTexture(rel);
-      if (t.id != 0) {
+      Image img = crave_load_image(rel);
+      if (img.data) {
+        Texture2D t = LoadTextureFromImage(img);
+        crave_image_free(img.data);
         g_tex[i].tex = t;
         g_tex[i].ok = true;
         return &g_tex[i].tex;
@@ -291,8 +294,7 @@ static void edit_field(App *app, FieldRef *fields, int idx,
         .backgroundColor = THEME_FIELD,
         .border = {.color = focused ? THEME_LINE_FOCUS : THEME_LINE,
                    .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
-                             THEME_BORDER, 0}},
-        .clip = {.horizontal = true}}) {
+                             THEME_BORDER, 0}}}) {
     if (empty && !focused)
       txt_it(placeholder, THEME_FONT_BODY, THEME_SOFT);
   }

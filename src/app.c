@@ -11,9 +11,9 @@
 #include <string.h>
 #include <time.h>
 #ifdef _WIN32
-  #include <direct.h>
-  #else
-  #include <sys/stat.h>
+#include <direct.h>
+#else
+#include <sys/stat.h>
 #endif
 
 // summaries
@@ -297,6 +297,7 @@ void update(App *app, Msg msg) {
   case MSG_SHOW:
     if (open_recipe(app, msg.id))
       app->screen = SCREEN_DETAIL;
+    app->focus = -1;
     break;
 
   case MSG_EDIT:
@@ -318,6 +319,7 @@ void update(App *app, Msg msg) {
   }
 
   case MSG_CANCEL:
+    app->focus = -1;
     if (app->editor.recipe.id != 0) {
       open_recipe(app, app->editor.recipe.id);
       app->screen = SCREEN_DETAIL;
@@ -328,6 +330,7 @@ void update(App *app, Msg msg) {
 
   case MSG_BACK:
     app->screen = SCREEN_GRID;
+    app->focus = -1;
     break;
 
   case MSG_FOCUS: {
@@ -365,6 +368,7 @@ void update(App *app, Msg msg) {
     app->confirm_delete = false;
     app_reload(app);
     app->screen = SCREEN_GRID;
+    app->focus = -1;
     break;
 
   case MSG_DELETE_NO:
@@ -565,6 +569,17 @@ static void nav_field(App *app, FieldRef *fields, int n, bool back) {
 
 // keyboard
 
+int active_fields(App *app, FieldRef *out) {
+  if (app->screen == SCREEN_GRID) {
+    out[0] = (FieldRef){app->search, CRAVE_SEARCH_CAP, false, FK_SCALAR,
+                        0,           CRAVE_SEARCH_KEY};
+    return 1;
+  }
+  if (app->screen == SCREEN_EDIT)
+    return collect_fields(&app->editor, out);
+  return 0;
+}
+
 void app_handle_input(App *app) {
   if (app->confirm_delete) {
     if (IsKeyPressed(KEY_ESCAPE))
@@ -580,8 +595,10 @@ void app_handle_input(App *app) {
     return;
   }
 
-  if (app->screen != SCREEN_EDIT)
+  if (app->screen != SCREEN_EDIT && app->screen != SCREEN_GRID)
     return;
+
+  bool edit = (app->screen == SCREEN_EDIT);
 
   bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
   bool super = IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
@@ -589,24 +606,24 @@ void app_handle_input(App *app) {
   bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
   bool alt = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
 
-  if (IsKeyPressed(KEY_ESCAPE)) {
+  if (edit && IsKeyPressed(KEY_ESCAPE)) {
     update(app, (Msg){.tag = MSG_CANCEL});
     return;
   }
 
-  if (mod && IsKeyPressed(KEY_S)) {
+  if (edit && mod && IsKeyPressed(KEY_S)) {
     update(app, (Msg){.tag = MSG_SAVE});
     return;
   }
 
   FieldRef fields[MAX_FIELDS];
-  int n = collect_fields(&app->editor, fields);
+  int n = active_fields(app, fields);
   if (n == 0)
     return;
 
   // focus == -1 means nothing is focused
   if (app->focus < 0 || app->focus >= n) {
-    if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_ENTER)) {
+    if (edit && (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_ENTER))) {
       bool back = shift && IsKeyDown(KEY_TAB);
       app->focus = back ? n - 1 : 0;
       app->cursor = 0;
@@ -622,6 +639,15 @@ void app_handle_input(App *app) {
     app->cursor = len;
   if (app->sel_anchor > len)
     app->sel_anchor = len;
+
+  // On the grid, Esc clears the search and drops focus.
+  if (!edit && IsKeyPressed(KEY_ESCAPE)) {
+    app->search[0] = '\0';
+    app->focus = -1;
+    app->cursor = 0;
+    app->sel_anchor = 0;
+    return;
+  }
 
   if (mod && IsKeyPressed(KEY_A)) {
     app->sel_anchor = 0;
@@ -648,7 +674,7 @@ void app_handle_input(App *app) {
     return;
   }
 
-  if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_ENTER)) {
+  if (edit && (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_ENTER))) {
     nav_field(app, fields, n, shift && IsKeyPressed(KEY_TAB));
     return;
   }

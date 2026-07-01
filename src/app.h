@@ -83,11 +83,15 @@ typedef struct {
   ListId list; // MSG_LIST_ADD and MSG_LIST_DEL
 } Msg;
 
+#define CRAVE_SEARCH_CAP 128
+#define CRAVE_SEARCH_KEY 9000u // Clay id seed for the grid search box
+
 typedef struct App {
   // grid
   RecipeSummary *summaries; // heap array, grown to fit
   int summary_count;
   int summary_cap;
+  char search[CRAVE_SEARCH_CAP]; // live filter query
 
   // open recipe (detail + editor share this)
   Screen screen;
@@ -112,6 +116,10 @@ void app_reload(App *ap);
 // build the ordered editable field list from the editor and returns the count
 int collect_fields(Editor *e, FieldRef *out);
 
+// Editable fields for the current screen: the search box on the grid, the
+// editor's fields while editing. Used by input, mouse, and overlay.
+int active_fields(App *app, FieldRef *out);
+
 // select the word under byte offset `at` in `buf` (used for double-click)
 void ed_select_word(App *app, const char *buf, int at);
 
@@ -126,5 +134,5 @@ void view_free(void);           // free the click pool, shutdown
 void ui_handle_mouse(App *app); // mouse -> field focus/cursor/selection
 void ui_overlay(App *app);      // draw editable field text/caret/selection
 void ui_textures_unload(void);  // free cached image textures, shutdown
-
+void ui_grid_free(void);        // free the grid search filter buffer, shutdown
 #endif

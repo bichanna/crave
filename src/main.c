@@ -144,6 +144,7 @@ int main(void) {
   app_shutdown(&app);
   view_free();
   ui_textures_unload();
+  ui_grid_free();
   for (int i = 0; i < CRAVE_FONT_COUNT; i++)
     UnloadFont(app.fonts[i]);
   free(mem);

@@ -5,6 +5,7 @@
 #include "raylib.h"
 #include "theme.h"
 
+#include <ctype.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -14,16 +15,35 @@
 
 #include "clay.h"
 
-#define ARENA_CAP 16384
-static char g_arena[ARENA_CAP];
-static int g_arena_off;
+#define ARENA_CHUNK 16384
+#define ARENA_MIN 1024 // always leave room for one string before advancing
+typedef struct ArenaChunk {
+  char buf[ARENA_CHUNK];
+  int off;
+  struct ArenaChunk *next;
+} ArenaChunk;
+static ArenaChunk *g_arena_head, *g_arena_curr;
 
 static const char *fmtf(const char *fmt, ...) {
-  int avail = ARENA_CAP - g_arena_off;
-  if (avail < 32)
+  if (g_arena_head == NULL) {
+    g_arena_head = calloc(1, sizeof *g_arena_head);
+    g_arena_curr = g_arena_head;
+  }
+  if (g_arena_curr == NULL)
     return "";
 
-  char *dst = g_arena + g_arena_off;
+  if (ARENA_CHUNK - g_arena_curr->off < ARENA_MIN) {
+    if (g_arena_curr->next == NULL) {
+      g_arena_curr->next = calloc(1, sizeof *g_arena_curr->next);
+      if (g_arena_curr->next == NULL)
+        return "";
+    }
+    g_arena_curr = g_arena_curr->next;
+    g_arena_curr->off = 0;
+  }
+
+  char *dst = g_arena_curr->buf + g_arena_curr->off;
+  int avail = ARENA_CHUNK - g_arena_curr->off;
   va_list ap;
   va_start(ap, fmt);
   int n = vsnprintf(dst, (size_t)avail, fmt, ap);
@@ -34,8 +54,23 @@ static const char *fmtf(const char *fmt, ...) {
   if (n >= avail)
     n = avail - 1;
 
-  g_arena_off += n + 1;
+  g_arena_curr->off += n + 1;
   return dst;
+}
+
+static void arena_reset(void) {
+  g_arena_curr = g_arena_head;
+  if (g_arena_head)
+    g_arena_head->off = 0;
+}
+
+static void arena_free(void) {
+  for (ArenaChunk *c = g_arena_head; c;) {
+    ArenaChunk *next = c->next;
+    free(c);
+    c = next;
+  }
+  g_arena_head = g_arena_curr = NULL;
 }
 
 // Click pool
@@ -83,6 +118,8 @@ static void click_reset(void) {
 }
 
 void view_free(void) {
+  arena_free();
+
   for (ClickChunk *c = g_head; c;) {
     ClickChunk *next = c->next;
     free(c);
@@ -372,15 +409,70 @@ static void card(App *app, RecipeSummary *s, float w) {
   }
 }
 
+// case insensitive substring test
+static bool ci_contains(const char *hay, const char *needle) {
+  if (!needle[0])
+    return true;
+  size_t nl = strlen(needle);
+  for (const char *p = hay; *p; p++) {
+    size_t k = 0;
+    while (k < nl && p[k] &&
+           tolower((unsigned char)p[k]) == tolower((unsigned char)needle[k]))
+      k++;
+    if (k == nl)
+      return true;
+  }
+  return false;
+}
+
+static bool summary_matches(const RecipeSummary *s, const char *q) {
+  if (!q[0])
+    return true;
+  if (ci_contains(s->title, q) || ci_contains(s->description, q))
+    return true;
+  for (int t = 0; t < s->tag_count; t++)
+    if (ci_contains(s->tags[t], q))
+      return true;
+  return false;
+}
+
+// reused scratch buffer of matching summary indics
+static int *g_filtered;
+static int g_filtered_cap;
+
+// Returns the count of matches into g_filtered or -1 if it can't allocate
+static int filter_summaries(App *app) {
+  if (g_filtered_cap < app->summary_count) {
+    int *p = realloc(g_filtered, (size_t)app->summary_count * sizeof *p);
+    if (!p)
+      return -1;
+    g_filtered = p;
+    g_filtered_cap = app->summary_count;
+  }
+  int m = 0;
+  for (int i = 0; i < app->summary_count; i++)
+    if (summary_matches(&app->summaries[i], app->search))
+      g_filtered[m++] = i;
+  return m;
+}
+
+void ui_grid_free(void) {
+  free(g_filtered);
+  g_filtered = NULL;
+  g_filtered_cap = 0;
+}
+
 static void screen_grid(App *app) {
+  FieldRef fields[MAX_FIELDS];
+  active_fields(app, fields); // [0] = search box
+
   CLAY(CLAY_ID("GHead"),
        {.layout = {
             .sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
             .childGap = THEME_GAP,
             .childAlignment = {CLAY_ALIGN_X_LEFT, CLAY_ALIGN_Y_CENTER}}}) {
     txt("Crave", THEME_FONT_TITLE, CRAVE_FONT_BOLD, THEME_INK);
-    CLAY(CLAY_ID("GSpacer"),
-         {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)}}}) {}
+    edit_field(app, fields, 0, "Search recipes"); // grows to fill the middle
     button(app, "bNew", "+ New", (Msg){.tag = MSG_NEW}, BTN_PRIMARY);
   }
 
@@ -392,22 +484,30 @@ static void screen_grid(App *app) {
     cols = 4;
   float cardw = (avail - (float)(cols - 1) * THEME_GAP) / (float)cols;
 
+  int m = filter_summaries(app);
+  bool filtered = (m >= 0);
+  int visible = filtered ? m : app->summary_count;
+
   CLAY(CLAY_ID("Grid"),
        {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
                    .childGap = THEME_GAP,
                    .layoutDirection = CLAY_TOP_TO_BOTTOM},
         .clip = {.vertical = true, .childOffset = Clay_GetScrollOffset()}}) {
-    for (int i = 0; i < app->summary_count; i += cols) {
+    for (int i = 0; i < visible; i += cols) {
       CLAY(CLAY_SID(str(fmtf("grow%d", i))),
            {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
                        .childGap = THEME_GAP}}) {
-        for (int j = i; j < i + cols && j < app->summary_count; j++)
-          card(app, &app->summaries[j], cardw);
+        for (int j = i; j < i + cols && j < visible; j++) {
+          int si = filtered ? g_filtered[j] : j;
+          card(app, &app->summaries[si], cardw);
+        }
       }
     }
 
     if (app->summary_count == 0)
       txt_it("No recipes yet - press + New.", THEME_FONT_BODY, THEME_SOFT);
+    else if (visible == 0)
+      txt_it("No recipes match your search.", THEME_FONT_BODY, THEME_SOFT);
   }
 }
 
@@ -662,7 +762,7 @@ static void modal_delete(App *app) {
 // view
 
 void view(App *app) {
-  g_arena_off = 0;
+  arena_reset();
 
   click_reset();
 
@@ -693,7 +793,7 @@ void view(App *app) {
 static int g_drag = -1;
 
 void ui_handle_mouse(App *app) {
-  if (app->screen != SCREEN_EDIT) {
+  if (app->screen != SCREEN_EDIT && app->screen != SCREEN_GRID) {
     g_drag = -1;
     return;
   }
@@ -705,7 +805,7 @@ void ui_handle_mouse(App *app) {
     cw = fs * 0.6f;
   float pad = THEME_PAD_FIELD;
   FieldRef fields[MAX_FIELDS];
-  int n = collect_fields(&app->editor, fields);
+  int n = active_fields(app, fields);
 
   if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
     static double last_click_t = -1e9;
@@ -773,10 +873,10 @@ void ui_handle_mouse(App *app) {
 }
 
 void ui_overlay(App *app) {
-  if (app->screen != SCREEN_EDIT)
+  if (app->screen != SCREEN_EDIT && app->screen != SCREEN_GRID)
     return;
   FieldRef fields[MAX_FIELDS];
-  int n = collect_fields(&app->editor, fields);
+  int n = active_fields(app, fields);
   Font font = app->fonts[CRAVE_FONT_REGULAR];
   float fs = THEME_FONT_BODY;
   float cw = MeasureTextEx(font, "W", fs, 0).x;

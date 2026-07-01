@@ -591,10 +591,15 @@ void app_handle_input(App *app) {
   if (n == 0)
     return;
 
+  // focus == -1 means nothing is focused
   if (app->focus < 0 || app->focus >= n) {
-    app->focus = 0;
-    app->cursor = 0;
-    app->sel_anchor = 0;
+    if (IsKeyPressed(KEY_TAB) || IsKeyPressed(KEY_ENTER)) {
+      bool back = shift && IsKeyDown(KEY_TAB);
+      app->focus = back ? n - 1 : 0;
+      app->cursor = 0;
+      app->sel_anchor = 0;
+    }
+    return;
   }
 
   FieldRef *f = &fields[app->focus];
@@ -642,10 +647,10 @@ void app_handle_input(App *app) {
       app->cursor = lo;
       app->sel_anchor = lo;
     } else {
-      move_cursor(
-          app, buf,
-          super ? 0 : (alt ? word_left(buf, app->cursor) : app->cursor - 1),
-          shift);
+      move_cursor(app, buf,
+                  super ? 0
+                        : (alt ? word_left(buf, app->cursor) : app->cursor - 1),
+                  shift);
     }
     return;
   }

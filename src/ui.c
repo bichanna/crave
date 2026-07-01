@@ -731,7 +731,7 @@ void ui_handle_mouse(App *app) {
         bool dbl =
             (now - last_click_t < CONFIG_DOUBLE_CLICK) && last_click_field == i;
         if (dbl) {
-          // ed_select_word(app, fields[i].buf, idx);
+          ed_select_word(app, fields[i].buf, idx);
           g_drag = -1;
           last_click_t = -1e9;
         } else {

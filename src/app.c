@@ -93,7 +93,11 @@ int collect_fields(Editor *e, FieldRef *o) {
   for (int i = 0; i < r->equipment_count; i++) {
     o[n++] =
         (FieldRef){r->equipment[i].name, CRAVE_NAME_CAP, false, FK_EQUIP, i,
-                   (uint32_t)(2000 + i)};
+                   (uint32_t)(1000 + i)};
+  }
+  for (int i = 0; i < r->step_count; i++) {
+    o[n++] = (FieldRef){r->steps[i].text,    CRAVE_STEP_CAP, false, FK_STEP, i,
+                        (uint32_t)(2000 + i)};
   }
   for (int i = 0; i < r->tag_count; i++) {
     o[n++] = (FieldRef){r->tags[i], CRAVE_TAG_CAP,       false, FK_TAG,
@@ -147,7 +151,7 @@ static void list_add(Recipe *r, ListId l) {
     break;
   case LIST_STEP:
     if (r->step_count < CRAVE_MAX_STEPS)
-      memset(&r->steps[r->equipment_count++], 0, sizeof r->steps[0]);
+      memset(&r->steps[r->step_count++], 0, sizeof r->steps[0]);
     break;
   case LIST_TAG:
     if (r->tag_count < CRAVE_MAX_TAGS)
@@ -481,7 +485,7 @@ static void focus_to(App *app, FieldRef *fields, int idx) {
 }
 
 static void nav_field(App *app, FieldRef *fields, int n, bool back) {
-  int curr = app->cursor;
+  int curr = app->focus;
   if (back) {
     focus_to(app, fields, (curr - 1 + n) % n);
     return;

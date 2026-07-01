@@ -153,8 +153,8 @@ int db_load_summaries(sqlite3 *db, RecipeSummary *out, int max_out) {
 
   sqlite3_stmt *st = NULL;
   if (sqlite3_prepare_v2(db,
-                         "SELECT id, title, image_path FROM recipes ORDER BY "
-                         "title COLLATE NOCASE, id;",
+                         "SELECT id, title, image_path, description FROM "
+                         "recipes ORDER BY title COLLATE NOCASE, id;",
                          -1, &st, NULL) != SQLITE_OK) {
     db_log(db, "prepare summaries");
     return -1;
@@ -178,6 +178,7 @@ int db_load_summaries(sqlite3 *db, RecipeSummary *out, int max_out) {
     s->id = (long)sqlite3_column_int64(st, 0);
     copy_col(s->title, CRAVE_TITLE_CAP, sqlite3_column_text(st, 1));
     copy_col(s->image_path, CRAVE_PATH_CAP, sqlite3_column_text(st, 2));
+    copy_col(s->description, CRAVE_DESC_CAP, sqlite3_column_text(st, 3));
 
     sqlite3_reset(tg);
     sqlite3_bind_int64(tg, 1, s->id);

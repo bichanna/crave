@@ -112,6 +112,9 @@ void app_reload(App *ap);
 // build the ordered editable field list from the editor and returns the count
 int collect_fields(Editor *e, FieldRef *out);
 
+// select the word under byte offset `at` in `buf` (used for double-click)
+void ed_select_word(App *app, const char *buf, int at);
+
 // keyboard (editing, Tab/Enter/Esc/Save), not a Msg
 void app_handle_input(App *app);
 

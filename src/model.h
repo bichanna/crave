@@ -53,6 +53,7 @@ typedef struct {
 typedef struct {
   long id;
   char title[CRAVE_TITLE_CAP];
+  char description[CRAVE_DESC_CAP];
   char image_path[CRAVE_PATH_CAP];
   char tags[CRAVE_MAX_TAGS][CRAVE_TAG_CAP];
   int tag_count;

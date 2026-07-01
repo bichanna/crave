@@ -464,6 +464,21 @@ static int word_right(const char *buf, int i) {
   return i;
 }
 
+void ed_select_word(App *app, const char *buf, int at) {
+  int len = (int)strlen(buf);
+  if (at < 0)
+    at = 0;
+  if (at > len)
+    at = len;
+  int start = at, end = at;
+  while (start > 0 && is_word(buf[start - 1]))
+    start--;
+  while (end < len && is_word(buf[end]))
+    end++;
+  app->sel_anchor = start; // start == end (on whitespace) selects nothing
+  app->cursor = end;
+}
+
 static void move_cursor(App *app, const char *buf, int to, bool shift) {
   int len = (int)strlen(buf);
   if (to < 0)
@@ -555,9 +570,11 @@ void app_handle_input(App *app) {
   if (app->screen != SCREEN_EDIT)
     return;
 
-  bool mod = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL) ||
-             IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+  bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+  bool super = IsKeyDown(KEY_LEFT_SUPER) || IsKeyDown(KEY_RIGHT_SUPER);
+  bool mod = ctrl || super; // clipboard / save / select-all accept either
   bool shift = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+  bool alt = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
 
   if (IsKeyPressed(KEY_ESCAPE)) {
     update(app, (Msg){.tag = MSG_CANCEL});
@@ -625,8 +642,10 @@ void app_handle_input(App *app) {
       app->cursor = lo;
       app->sel_anchor = lo;
     } else {
-      move_cursor(app, buf, mod ? word_left(buf, app->cursor) : app->cursor - 1,
-                  shift);
+      move_cursor(
+          app, buf,
+          super ? 0 : (alt ? word_left(buf, app->cursor) : app->cursor - 1),
+          shift);
     }
     return;
   }
@@ -638,8 +657,10 @@ void app_handle_input(App *app) {
       app->cursor = hi;
       app->sel_anchor = hi;
     } else {
-      move_cursor(app, buf,
-                  mod ? word_right(buf, app->cursor) : app->cursor + 1, shift);
+      move_cursor(
+          app, buf,
+          super ? len : (alt ? word_right(buf, app->cursor) : app->cursor + 1),
+          shift);
     }
     return;
   }

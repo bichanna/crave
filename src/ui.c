@@ -250,13 +250,23 @@ static void image_block(App *app, const char *rel, float w, float h,
                         const char *id) {
   (void)app;
   Texture2D *t = cache_get(rel);
-  if (t) {
+  if (t && t->width > 0 && t->height > 0) {
+    float scale = fminf(w / (float)t->width, h / (float)t->height);
+    float iw = (float)t->width * scale;
+    float ih = (float)t->height * scale;
     CLAY(CLAY_SID(str(id)),
-         {.layout = {.sizing = {CLAY_SIZING_FIXED(w), CLAY_SIZING_FIXED(h)}},
-          .image = {.imageData = t},
+         {.layout = {.sizing = {CLAY_SIZING_FIXED(w), CLAY_SIZING_FIXED(h)},
+                     .childAlignment = {CLAY_ALIGN_X_CENTER,
+                                        CLAY_ALIGN_Y_CENTER}},
+          .backgroundColor = THEME_CARD,
           .border = {.color = THEME_LINE,
                      .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
-                               THEME_BORDER, 0}}}) {}
+                               THEME_BORDER, 0}}}) {
+      CLAY(
+          CLAY_SID(str(fmtf("%s_i", id))),
+          {.layout = {.sizing = {CLAY_SIZING_FIXED(iw), CLAY_SIZING_FIXED(ih)}},
+           .image = {.imageData = t}}) {}
+    }
   } else {
     CLAY(CLAY_SID(str(id)),
          {.layout = {.sizing = {CLAY_SIZING_FIXED(w), CLAY_SIZING_FIXED(h)},
@@ -316,6 +326,52 @@ static void section_header(const char *s) {
   }
 }
 
+static const char *truncate_desc(const char *s) {
+  int len = (int)strlen(s);
+  if (len <= CONFIG_CARD_DESC_MAX)
+    return s;
+  int cut = CONFIG_CARD_DESC_MAX;
+  while (cut > 0 && s[cut] != ' ')
+    cut--;
+  if (cut == 0)
+    cut = CONFIG_CARD_DESC_MAX;
+  return fmtf("%.*s...", cut, s);
+}
+
+static void card(App *app, RecipeSummary *s, float w) {
+  CLAY(CLAY_SID(str(fmtf("card%ld", s->id))),
+       {.layout = {.sizing = {CLAY_SIZING_FIXED(w), CLAY_SIZING_FIT(0)},
+                   .padding = {THEME_GAP_SM, THEME_GAP_SM, THEME_GAP_SM,
+                               THEME_GAP_SM},
+                   .childGap = THEME_GAP_SM,
+                   .layoutDirection = CLAY_TOP_TO_BOTTOM},
+        .backgroundColor = Clay_Hovered() ? THEME_CARD_HOVER : THEME_CARD,
+        .border = {.color = THEME_LINE,
+                   .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
+                             THEME_BORDER, 0}}}) {
+    dispatch(app, (Msg){.tag = MSG_SHOW, .id = s->id});
+    image_block(app, s->image_path, w - 2 * THEME_GAP_SM, CONFIG_CARD_IMG_H,
+                fmtf("ci%ld", s->id));
+    txt(s->title[0] ? s->title : "Untitled", THEME_FONT_H2, CRAVE_FONT_BOLD,
+        THEME_INK);
+    if (s->description[0])
+      para(truncate_desc(s->description), THEME_SOFT);
+    if (s->tag_count > 0)
+      CLAY(CLAY_SID(str(fmtf("ct%ld", s->id))),
+           {.layout = {.childGap = THEME_GAP_XS}}) {
+        for (int t = 0; t < s->tag_count && t < 4; t++)
+          CLAY(CLAY_SID(str(fmtf("ctg%ld_%d", s->id, t))),
+               {.layout = {.padding = {6, 6, 2, 2}},
+                .backgroundColor = THEME_PAPER,
+                .border = {.color = THEME_LINE,
+                           .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
+                                     THEME_BORDER, 0}}}) {
+            txt(s->tags[t], THEME_FONT_LABEL, CRAVE_FONT_REGULAR, THEME_SOFT);
+          }
+      }
+  }
+}
+
 static void screen_grid(App *app) {
   CLAY(CLAY_ID("GHead"),
        {.layout = {
@@ -328,48 +384,25 @@ static void screen_grid(App *app) {
     button(app, "bNew", "+ New", (Msg){.tag = MSG_NEW}, BTN_PRIMARY);
   }
 
+  float avail = (float)GetScreenWidth() - 2.0f * THEME_PAD;
+  int cols = (int)(avail / (float)CONFIG_CARD_MIN_W);
+  if (cols < 1)
+    cols = 1;
+  if (cols > 4)
+    cols = 4;
+  float cardw = (avail - (float)(cols - 1) * THEME_GAP) / (float)cols;
+
   CLAY(CLAY_ID("Grid"),
        {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_GROW(0)},
-                   .childGap = THEME_GAP_SM,
+                   .childGap = THEME_GAP,
                    .layoutDirection = CLAY_TOP_TO_BOTTOM},
         .clip = {.vertical = true, .childOffset = Clay_GetScrollOffset()}}) {
-    for (int i = 0; i < app->summary_count; i++) {
-      RecipeSummary *s = &app->summaries[i];
-      CLAY(CLAY_IDI("Row", (uint32_t)i),
+    for (int i = 0; i < app->summary_count; i += cols) {
+      CLAY(CLAY_SID(str(fmtf("grow%d", i))),
            {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
-                       .padding = {THEME_GAP_SM, THEME_GAP_SM, THEME_GAP_SM,
-                                   THEME_GAP_SM},
-                       .childGap = THEME_GAP,
-                       .childAlignment = {CLAY_ALIGN_X_LEFT,
-                                          CLAY_ALIGN_Y_CENTER}},
-            .backgroundColor = Clay_Hovered() ? THEME_CARD_HOVER : THEME_CARD,
-            .border = {.color = THEME_LINE,
-                       .width = {THEME_BORDER, THEME_BORDER, THEME_BORDER,
-                                 THEME_BORDER, 0}}}) {
-        dispatch(app, (Msg){.tag = MSG_SHOW, .id = s->id});
-        image_block(app, s->image_path, CONFIG_THUMB, CONFIG_THUMB,
-                    fmtf("th%ld", s->id));
-        CLAY(CLAY_SID(str(fmtf("rc%ld", s->id))),
-             {.layout = {.sizing = {CLAY_SIZING_GROW(0), CLAY_SIZING_FIT(0)},
-                         .childGap = THEME_GAP_XS,
-                         .layoutDirection = CLAY_TOP_TO_BOTTOM}}) {
-          txt(s->title[0] ? s->title : "Untitled", THEME_FONT_H2,
-              CRAVE_FONT_BOLD, THEME_INK);
-          if (s->tag_count > 0)
-            CLAY(CLAY_SID(str(fmtf("rt%ld", s->id))),
-                 {.layout = {.childGap = THEME_GAP_XS}}) {
-              for (int t = 0; t < s->tag_count; t++)
-                CLAY(CLAY_SID(str(fmtf("rtg%ld_%d", s->id, t))),
-                     {.layout = {.padding = {6, 6, 2, 2}},
-                      .backgroundColor = THEME_PAPER,
-                      .border = {.color = THEME_LINE,
-                                 .width = {THEME_BORDER, THEME_BORDER,
-                                           THEME_BORDER, THEME_BORDER, 0}}}) {
-                  txt(s->tags[t], THEME_FONT_LABEL, CRAVE_FONT_REGULAR,
-                      THEME_SOFT);
-                }
-            }
-        }
+                       .childGap = THEME_GAP}}) {
+        for (int j = i; j < i + cols && j < app->summary_count; j++)
+          card(app, &app->summaries[j], cardw);
       }
     }
 
@@ -675,7 +708,10 @@ void ui_handle_mouse(App *app) {
   int n = collect_fields(&app->editor, fields);
 
   if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+    static double last_click_t = -1e9;
+    static int last_click_field = -1;
     g_drag = -1;
+    bool hit = false;
     for (int i = 0; i < n; i++) {
       Clay_ElementData ed = Clay_GetElementData(CLAY_IDI("F", fields[i].key));
       if (!ed.found)
@@ -683,7 +719,6 @@ void ui_handle_mouse(App *app) {
       Clay_BoundingBox b = ed.boundingBox;
       if (mp.x >= b.x && mp.x <= b.x + b.width && mp.y >= b.y &&
           mp.y <= b.y + b.height) {
-        app->focus = i;
         float scroll = field_scroll(app, i, cw, b.width - 2 * pad);
         int idx = (int)((mp.x - (b.x + pad - scroll)) / cw + 0.5f);
         int len = (int)strlen(fields[i].buf);
@@ -691,11 +726,31 @@ void ui_handle_mouse(App *app) {
           idx = 0;
         if (idx > len)
           idx = len;
-        app->cursor = idx;
-        app->sel_anchor = idx;
-        g_drag = i;
+        app->focus = i;
+        double now = GetTime();
+        bool dbl =
+            (now - last_click_t < CONFIG_DOUBLE_CLICK) && last_click_field == i;
+        if (dbl) {
+          // ed_select_word(app, fields[i].buf, idx);
+          g_drag = -1;
+          last_click_t = -1e9;
+        } else {
+          app->cursor = idx;
+          app->sel_anchor = idx;
+          g_drag = i;
+          last_click_t = now;
+          last_click_field = i;
+        }
+        hit = true;
         break;
       }
+    }
+
+    if (!hit) { // clicked empty space or a button: drop focus
+      app->focus = -1;
+      app->cursor = 0;
+      app->sel_anchor = 0;
+      last_click_field = -1;
     }
   } else if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && g_drag >= 0 &&
              g_drag < n) {
@@ -729,6 +784,25 @@ void ui_overlay(App *app) {
     cw = fs * 0.6f;
   float pad = THEME_PAD_FIELD;
 
+  // restart the blink whenever focus/caret/selection/length changes, so the
+  // caret is solid while moving or typing and only blinks once idle :) I'm
+  // quite proud of this one
+  static int bp_focus = -2, bp_cur = -1, bp_sel = -1, bp_len = -1;
+  static double blink_base = 0.0;
+  int cur_len = (app->focus >= 0 && app->focus < n)
+                    ? (int)strlen(fields[app->focus].buf)
+                    : -1;
+  if (app->focus != bp_focus || app->cursor != bp_cur ||
+      app->sel_anchor != bp_sel || cur_len != bp_len) {
+    blink_base = GetTime();
+    bp_focus = app->focus;
+    bp_cur = app->cursor;
+    bp_sel = app->sel_anchor;
+    bp_len = cur_len;
+  }
+  bool caret_on = fmod(GetTime() - blink_base, CONFIG_CARET_PERIOD) <
+                  CONFIG_CARET_PERIOD / 2;
+
   for (int i = 0; i < n; i++) {
     Clay_ElementData ed = Clay_GetElementData(CLAY_IDI("F", fields[i].key));
     if (!ed.found)
@@ -752,7 +826,7 @@ void ui_overlay(App *app) {
     }
     if (text[0])
       DrawTextEx(font, text, (Vector2){tx, ty}, fs, 0, rl(THEME_INK));
-    if (focused && fmodf((float)GetTime(), 1.0f) < 0.5f)
+    if (focused && caret_on)
       DrawRectangle((int)(tx + (float)app->cursor * cw), (int)ty, 2, (int)fs,
                     rl(THEME_INK));
     EndScissorMode();

@@ -1,0 +1,6 @@
+- [ ] Search with title, tags, description, and whatnot
+- [ ] Make a blog about this
+- [ ] Guard unsaved edits
+- [ ] Undo/redo in text fields
+- [ ] fmtf() per-frame string arena has a soft ceiling, so fix it
+- [ ] Tag autocomplete

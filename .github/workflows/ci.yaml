@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux . x86_64 . gcc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y meson ninja-build \
+            libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev \
+            libxcursor-dev libxi-dev
+      - name: Build
+        run: |
+          meson setup build
+          meson compile -C build
+
+  macos:
+    name: macOS . arm64 . clang
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: brew install meson ninja
+      - name: Build
+        run: |
+          meson setup build
+          meson compile -C build
+
+  windows:
+    name: Windows . x86_64 . MinGW
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-python
+      - name: Build
+        run: |
+          meson setup build
+          meson compile -C build
